@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (skip playwright browser download — not needed for these checks)
+        run: pip install requests openpyxl python-dotenv pytest
+
+      - name: Compile-check every module
+        run: python -m compileall -q main.py src config tests
+
+      - name: Import smoke test (catches import-time errors compileall can't)
+        run: |
+          python -c "from src import db, dedup, models, normalize, pipeline, export_xlsx"
+          python -c "from config.regions import REGIONS, get_region"
+          python -c "import ast; ast.parse(open('src/scrapers/yandex_maps.py', encoding='utf-8').read())"
+          python -c "import ast; ast.parse(open('src/scrapers/gis2.py', encoding='utf-8').read())"
+          python -c "import ast; ast.parse(open('src/scrapers/google_maps.py', encoding='utf-8').read())"
+          # scrapers/gis2.py и scrapers/google_maps.py импортируют playwright
+          # только внутри функции scrape_region(), поэтому обычный import модуля
+          # (без вызова функции) не требует playwright — не тянем сюда браузер
+          python -c "from src.scrapers import yandex_maps"
+
+      - name: Run offline unit tests (pure functions, no network)
+        run: python -m pytest -q tests/
+
+  # Намеренно НЕ в этом workflow, и почему:
+  # - Живой скрейпинг 2ГИС/Яндекс.Карт/Google Maps с раннера CI: ненадёжно
+  #   (гео-блокировки, капча — см. README.md, раздел "Источники и их реальный
+  #   статус") и не то, чем стоит нагружать эти площадки на каждый push.
+  #   Вся логика, которую реально стоит тестировать без сети (нормализация
+  #   телефона/email, фильтр "это стоматология", ключ дедупликации), уже
+  #   покрыта офлайн-тестами выше.
