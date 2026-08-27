@@ -55,6 +55,11 @@ def main():
     ap.add_argument("--audit-only", action="store_true",
                      help="не собирать заново — только прогнать проверку на возможные "
                           "дубли (src/audit_dupes.py) по уже накопленной SQLite")
+    ap.add_argument("--cities", default=None,
+                     help="через запятую: собрать только эти города из указанного "
+                          "региона (имена как в config/regions.py). Нужен для "
+                          "дозапуска после прерывания: уже сохранённые по "
+                          "чекпоинтам города не пересобираются заново.")
     ap.add_argument("--db-path", default=None,
                      help="путь к отдельному файлу SQLite вместо data/leads.sqlite3 "
                           "(по умолчанию). Нужен для параллельных запусков нескольких "
@@ -117,6 +122,16 @@ def main():
         if not region_cfg["confirmed"]:
             print(f"[!] Регион {region_cfg['name']!r} ещё не подтверждён владельцем — "
                   f"запускаю всё равно, т.к. явно указан в --region.")
+        if args.cities:
+            wanted = [c.strip() for c in args.cities.split(",") if c.strip()]
+            known = set(region_cfg["cities"])
+            missing = [c for c in wanted if c not in known]
+            if missing:
+                ap.error(f"--cities: {missing} нет в регионе {region_cfg['name']!r} "
+                         f"(есть: {sorted(known)})")
+            # копия конфига, а не правка REGIONS — глобальный конфиг не мутируем
+            region_cfg = dict(region_cfg, cities=[c for c in region_cfg["cities"] if c in wanted])
+            print(f"[!] --cities: только {region_cfg['cities']}")
         print(f"\n=== Регион: {region_cfg['name']} ({region_id}) | источники: {sources} ===")
         leads, stats = run_region(region_id, region_cfg, sources, conn)
         all_stats[region_cfg["name"]] = stats
