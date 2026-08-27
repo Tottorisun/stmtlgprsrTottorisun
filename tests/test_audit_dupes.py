@@ -32,6 +32,21 @@ def test_generic_name_does_not_flood_nested_name_signal():
     assert nested == []
 
 
+def test_generic_singular_stomatolog_does_not_flood_nested_name_signal():
+    # Реальный кейс из Краснодарского края (27.08.2026): клиника "Стоматолог"
+    # в Сочи и отдельная клиника "Стоматолог" в Анапе дали 14 ложных
+    # "вложенных" совпадений на двоих — то же явление, что и "Стоматология"
+    # в Тюмени, но со словом без "-ия" (изначально не было в GENERIC_NAMES).
+    leads = [
+        _lead("Стоматолог", "Сочи", "Сочи, микрорайон Центральный", "+7 862 111-11-11"),
+        _lead("NEO стоматология", "Сочи", "ул. Туапсинская, 5-а", "+7 918 222-22-22"),
+        _lead("Стоматология Иевлева", "Сочи", "жилой район Адлер", "+7 999 333-33-33"),
+    ]
+    groups = find_possible_duplicates(leads)
+    nested = [g for g in groups if g["signal"] == "вложенное_название"]
+    assert nested == []
+
+
 def test_fuzzy_name_match_same_city_is_flagged():
     leads = [
         _lead("РИА Дент", "Тюмень", "Тюмень, Холодильная улица, 54/7", "+7 345 111-11-11"),
