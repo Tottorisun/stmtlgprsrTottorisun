@@ -217,29 +217,56 @@ def _search_city(page, city, log):
     return out
 
 
-def scrape_region(region_cfg, log=print):
+def open_session(log=print):
+    """Один запуск persistent-context Chrome на весь регион (запуск браузера —
+    секунды накладных расходов ×N городов; чек-пойнт по городам делается на
+    уровне SQLite в pipeline.py, не на уровне браузера, см. 27.08.2026)."""
     from playwright.sync_api import sync_playwright
 
-    out = []
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as pw:
-        # launch_persistent_context вместо launch()+new_context() — см. docstring п.1
-        ctx = pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            channel="chrome", headless=False,
-            args=["--disable-blink-features=AutomationControlled", "--disable-quic",
-                  "--window-position=2000,2000", "--lang=ru"],  # --lang=ru: см. docstring п.2
-            locale="ru-RU", viewport={"width": 1440, "height": 900},
-        )
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        try:
-            for city in region_cfg["cities"]:
-                log(f"  [google_maps] город: {city}")
-                try:
-                    out.extend(_search_city(page, city, log))
-                except SourceBlocked as e:
-                    log(f"  [google_maps] ОСТАНОВКА по блоку: {e}")
-                    break
-        finally:
-            ctx.close()
+    pw = sync_playwright().start()
+    # launch_persistent_context вместо launch()+new_context() — см. docstring п.1
+    ctx = pw.chromium.launch_persistent_context(
+        str(PROFILE_DIR),
+        channel="chrome", headless=False,
+        args=["--disable-blink-features=AutomationControlled", "--disable-quic",
+              "--window-position=2000,2000", "--lang=ru"],  # --lang=ru: см. docstring п.2
+        locale="ru-RU", viewport={"width": 1440, "height": 900},
+    )
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    return {"pw": pw, "ctx": ctx, "page": page}
+
+
+def close_session(session):
+    try:
+        session["ctx"].close()
+    finally:
+        session["pw"].stop()
+
+
+def scrape_city(session, city, log=print):
+    """session — из open_session(). Кидает SourceBlocked при устойчивой капче —
+    вызывающий код (pipeline.py) это ловит и исключает google_maps из
+    дальнейших городов региона, а не роняет весь прогон."""
+    log(f"  [google_maps] город: {city}")
+    return _search_city(session["page"], city, log)
+
+
+def scrape_region(region_cfg, log=print):
+    """Оставлено для прямого вызова одного источника целиком (напр. из тестов/
+    консоли) — собирает весь регион в памяти и возвращает одним списком, БЕЗ
+    промежуточных сохранений. src/pipeline.py с 27.08.2026 использует
+    open_session/scrape_city/close_session напрямую для чек-пойнта в SQLite
+    после каждого города — см. src/pipeline.py."""
+    session = open_session(log=log)
+    out = []
+    try:
+        for city in region_cfg["cities"]:
+            try:
+                out.extend(scrape_city(session, city, log=log))
+            except SourceBlocked as e:
+                log(f"  [google_maps] ОСТАНОВКА по блоку: {e}")
+                break
+    finally:
+        close_session(session)
     return out

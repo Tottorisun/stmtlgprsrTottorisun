@@ -9,6 +9,13 @@ CLI: собрать лиды (стоматологии без сайта) по �
     python main.py --list-regions
     python main.py --export-only          # пересобрать .xlsx из уже накопленной SQLite, без сети
 
+    # параллельный сбор несколькими процессами/агентами одновременно: у каждого
+    # своя изолированная SQLite (и свой .xlsx рядом с ней) через --db-path,
+    # чтобы не было двух одновременных writer'ов в один файл. Слияние всех
+    # изолированных баз в основную data/leads.sqlite3 — отдельный шаг после.
+    python main.py --region krasnodar --sources yandex_maps --db-path data/parallel/krasnodar.sqlite3
+    python main.py --region moscow --sources yandex_maps --db-path data/parallel/moscow.sqlite3
+
 По умолчанию источники: yandex_maps,2gis,google_maps (порядок = приоритет из ТЗ).
 2gis и google_maps требуют Playwright + системный Chrome и открывают видимое
 окно браузера (headless=False — так меньше похоже на бота). yandex_maps не
@@ -48,6 +55,13 @@ def main():
     ap.add_argument("--audit-only", action="store_true",
                      help="не собирать заново — только прогнать проверку на возможные "
                           "дубли (src/audit_dupes.py) по уже накопленной SQLite")
+    ap.add_argument("--db-path", default=None,
+                     help="путь к отдельному файлу SQLite вместо data/leads.sqlite3 "
+                          "(по умолчанию). Нужен для параллельных запусков нескольких "
+                          "агентов по разным регионам ОДНОВРЕМЕННО — общий файл SQLite "
+                          "с несколькими одновременными writer'ами рискует потерянными "
+                          "записями/повреждением; изолированная база на регион/агента "
+                          "снимает этот риск, слияние в общую базу — отдельный шаг после.")
     args = ap.parse_args()
 
     if args.list_regions:
@@ -56,16 +70,27 @@ def main():
             print(f"{rid:12s} {cfg['name']:28s} [{flag}]  города: {', '.join(cfg['cities'])}")
         return
 
-    conn = db.connect()
+    conn = db.connect(args.db_path)
+    # При --db-path .xlsx тоже уводим в отдельный файл рядом с этой базой —
+    # иначе несколько параллельных запусков (изолированные --db-path, но общий
+    # OUT_XLSX по умолчанию) наступили бы на тот же риск одновременной записи,
+    # ради которого и заводился --db-path, только на уровне .xlsx, а не SQLite.
+    if args.db_path:
+        db_path_obj = Path(args.db_path)
+        out_xlsx = db_path_obj.with_suffix(".xlsx")
+        print(f"[!] Отдельная база: {db_path_obj} -> .xlsx: {out_xlsx} "
+              f"(не data/leads.sqlite3 / out/*.xlsx по умолчанию)")
+    else:
+        out_xlsx = OUT_XLSX
 
     if args.export_only:
         all_leads = db.fetch_all(conn)
         by_region = {}
         for l in all_leads:
             by_region.setdefault(l["region"], []).append(l)
-        OUT_XLSX.parent.mkdir(parents=True, exist_ok=True)
-        export_xlsx(by_region, OUT_XLSX)
-        print(f"Пересобрано из SQLite: {len(all_leads)} лидов -> {OUT_XLSX}")
+        out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+        export_xlsx(by_region, out_xlsx)
+        print(f"Пересобрано из SQLite: {len(all_leads)} лидов -> {out_xlsx}")
         return
 
     if args.audit_only:
@@ -105,9 +130,9 @@ def main():
     by_region = {}
     for l in all_leads:
         by_region.setdefault(l["region"], []).append(l)
-    OUT_XLSX.parent.mkdir(parents=True, exist_ok=True)
-    export_xlsx(by_region, OUT_XLSX)
-    print(f"\n.xlsx обновлён: {OUT_XLSX} (все регионы, накопленные в SQLite: {len(all_leads)} лидов)")
+    out_xlsx.parent.mkdir(parents=True, exist_ok=True)
+    export_xlsx(by_region, out_xlsx)
+    print(f"\n.xlsx обновлён: {out_xlsx} (все регионы, накопленные в этой SQLite: {len(all_leads)} лидов)")
 
     # Отдельный отчёт-проверка (не сливает автоматически, см. src/audit_dupes.py
     # и почему так — то же решение, что в audit_dupes_deep2.py у RUSIMEX)

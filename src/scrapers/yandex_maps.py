@@ -54,7 +54,12 @@ STOP_AFTER_EMPTY_PAGES = 2   # если 2 страницы подряд не д�
 STATE_VIEW_RE = re.compile(r'<script type="application/json" class="state-view">(.*?)</script>', re.S)
 
 
-def _session():
+def open_session(log=print):
+    """Единая точка входа для pipeline.py: одна requests.Session на весь
+    регион (дешёвая, но переиспользуется, чтобы не плодить лишние объекты
+    на каждый город — интерфейс единый с gis2.py/google_maps.py, где сессия
+    (открытый браузер) реально дорогая и НЕ пересоздаётся на каждый город,
+    см. 27.08.2026, чек-пойнт по городам в src/pipeline.py)."""
     s = requests.Session()
     s.headers.update({
         "User-Agent": UA,
@@ -62,6 +67,10 @@ def _session():
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
     })
     return s
+
+
+def close_session(session):
+    session.close()
 
 
 def _fetch_page(sess, query, page):
@@ -102,11 +111,11 @@ def _extract(item, city, source_url):
     }
 
 
-def scrape_city(city, log=print):
+def scrape_city(session, city, log=print):
     """Собрать по одному городу все записи по всем запросам QUERIES. Возвращает
     список сырых записей (см. base.RAW_FIELDS), включая записи С сайтом —
-    фильтрацию has_website делает pipeline.py, здесь только сбор."""
-    sess = _session()
+    фильтрацию has_website делает pipeline.py, здесь только сбор.
+    session — из open_session() (requests.Session)."""
     out = []
     seen_ids = set()
     for q in QUERIES:
@@ -114,7 +123,7 @@ def scrape_city(city, log=print):
         new_in_query = 0
         empty_streak = 0
         for page in range(1, MAX_PAGES_PER_QUERY + 1):
-            res = _fetch_page(sess, full_q, page)
+            res = _fetch_page(session, full_q, page)
             items = (res or {}).get("items", [])
             if not items:
                 break
@@ -141,19 +150,31 @@ def scrape_city(city, log=print):
 
 
 def scrape_region(region_cfg, log=print):
-    """region_cfg: элемент config.regions.REGIONS (dict с ключом 'cities')."""
+    """region_cfg: элемент config.regions.REGIONS (dict с ключом 'cities').
+
+    Оставлено для прямого вызова одного источника целиком (напр. из тестов/
+    консоли) — собирает весь регион в памяти и возвращает одним списком, БЕЗ
+    промежуточных сохранений. src/pipeline.py с 27.08.2026 НЕ использует эту
+    функцию — там нужен чек-пойнт в SQLite после каждого города (если процесс
+    упадёт посреди региона, уже собранные города не должны теряться), поэтому
+    pipeline.py вызывает open_session/scrape_city/close_session по отдельности
+    и сохраняет результат город за городом. См. src/pipeline.py."""
+    session = open_session(log=log)
     out = []
-    for city in region_cfg["cities"]:
-        log(f"  [yandex_maps] город: {city}")
-        try:
-            out.extend(scrape_city(city, log=log))
-        except SourceBlocked as e:
-            log(f"  [yandex_maps] ОСТАНОВКА по блоку: {e}")
-            break
-        except Exception as e:
-            # Как в harvest_yandex.py: сбой одного города (сеть/парсинг) не должен
-            # ронять весь регион — логируем и идём дальше, а не падаем молча.
-            log(f"  [yandex_maps] ОШИБКА в городе {city}, пропускаю: "
-                f"{type(e).__name__}: {str(e)[:160]}")
-            continue
+    try:
+        for city in region_cfg["cities"]:
+            log(f"  [yandex_maps] город: {city}")
+            try:
+                out.extend(scrape_city(session, city, log=log))
+            except SourceBlocked as e:
+                log(f"  [yandex_maps] ОСТАНОВКА по блоку: {e}")
+                break
+            except Exception as e:
+                # Как в harvest_yandex.py: сбой одного города (сеть/парсинг) не должен
+                # ронять весь регион — логируем и идём дальше, а не падаем молча.
+                log(f"  [yandex_maps] ОШИБКА в городе {city}, пропускаю: "
+                    f"{type(e).__name__}: {str(e)[:160]}")
+                continue
+    finally:
+        close_session(session)
     return out

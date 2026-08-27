@@ -235,28 +235,60 @@ def _slugify_city(city):
     return known.get(key, key.replace(" ", "_").replace("-", "_"))
 
 
-def scrape_region(region_cfg, log=print):
-    """Требует Playwright + системный Chrome. Кидает SourceBlocked при капче —
-    вызывающий код (pipeline.py) это ловит и продолжает с тем, что уже собрано."""
+def open_session(log=print):
+    """Один запуск Chrome на весь регион (открывать браузер на каждый город —
+    секунды накладных расходов ×N городов; чек-пойнт по городам делается на
+    уровне SQLite в pipeline.py, не на уровне браузера, см. 27.08.2026)."""
     from playwright.sync_api import sync_playwright
 
+    pw = sync_playwright().start()
+    browser, ctx = _open_browser(pw)
+    page = ctx.new_page()
+    return {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
+
+
+def close_session(session):
+    try:
+        session["browser"].close()
+    finally:
+        session["pw"].stop()
+
+
+def scrape_city(session, city, log=print):
+    """Требует Playwright + системный Chrome (через session из open_session()).
+    Кидает SourceBlocked при капче — вызывающий код (pipeline.py) это ловит
+    и исключает 2gis из дальнейших городов региона, а не роняет весь прогон."""
+    page = session["page"]
+    slug = _slugify_city(city)
+    log(f"  [2gis] город: {city} (slug={slug})")
+    seen_ids = set()
+    ids = _collect_firm_ids(page, slug, seen_ids)
+    log(f"  [2gis] {city}: найдено карточек {len(ids)}")
     out = []
-    with sync_playwright() as pw:
-        browser, ctx = _open_browser(pw)
-        page = ctx.new_page()
-        try:
-            for city in region_cfg["cities"]:
-                slug = _slugify_city(city)
-                log(f"  [2gis] город: {city} (slug={slug})")
-                seen_ids = set()
-                ids = _collect_firm_ids(page, slug, seen_ids)
-                log(f"  [2gis] {city}: найдено карточек {len(ids)}")
-                for fid in ids:
-                    rec = _scrape_card(page, slug, fid)
-                    if rec:
-                        out.append(rec)
-                    # 2.0-2.5с — значение из 2gis_deep_scan.md (см. docstring, п.2)
-                    time.sleep(random.uniform(2.0, 2.5))
-        finally:
-            browser.close()
+    for fid in ids:
+        rec = _scrape_card(page, slug, fid)
+        if rec:
+            out.append(rec)
+        # 2.0-2.5с — значение из 2gis_deep_scan.md (см. docstring, п.2)
+        time.sleep(random.uniform(2.0, 2.5))
+    return out
+
+
+def scrape_region(region_cfg, log=print):
+    """Оставлено для прямого вызова одного источника целиком (напр. из тестов/
+    консоли) — собирает весь регион в памяти и возвращает одним списком, БЕЗ
+    промежуточных сохранений. src/pipeline.py с 27.08.2026 использует
+    open_session/scrape_city/close_session напрямую для чек-пойнта в SQLite
+    после каждого города — см. src/pipeline.py."""
+    session = open_session(log=log)
+    out = []
+    try:
+        for city in region_cfg["cities"]:
+            try:
+                out.extend(scrape_city(session, city, log=log))
+            except SourceBlocked as e:
+                log(f"  [2gis] ОСТАНОВКА по блоку: {e}")
+                break
+    finally:
+        close_session(session)
     return out
