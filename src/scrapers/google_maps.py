@@ -50,6 +50,7 @@ gmaps_az.py / gmaps_uz_az_cards.py — все пять используют од
 досрочно перенос их checkpoint-файлов сюда не даёт ничего, чего пайплайн не
 делает иначе.
 """
+import os
 import re
 import time
 import random
@@ -63,7 +64,16 @@ MAX_SCROLLS = 40           # RUSIMEX-значение, см. docstring п.5
 STABLE_ROUNDS = 4          # RUSIMEX-значение, см. docstring п.5
 MAX_RESULTS_PER_CITY = 80
 
-PROFILE_DIR = pathlib.Path(__file__).resolve().parents[2] / "data" / "_gmaps_profile"
+# Chrome не даёт открыть два экземпляра на одном user-data-dir: при
+# параллельных запусках (несколько main.py c разными --db-path) каждому
+# процессу нужен СВОЙ профиль — иначе второй Chrome молча не стартует.
+# Переопределяется переменной окружения GMAPS_PROFILE_DIR.
+PROFILE_DIR = pathlib.Path(
+    os.environ.get(
+        "GMAPS_PROFILE_DIR",
+        pathlib.Path(__file__).resolve().parents[2] / "data" / "_gmaps_profile",
+    )
+)
 
 
 def _is_blocked(page):
