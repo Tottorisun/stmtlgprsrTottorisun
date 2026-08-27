@@ -24,7 +24,7 @@ jobs:
 
       - name: Import smoke test (catches import-time errors compileall can't)
         run: |
-          python -c "from src import db, dedup, models, normalize, pipeline, export_xlsx"
+          python -c "from src import db, dedup, models, normalize, pipeline, export_xlsx, audit_dupes"
           python -c "from config.regions import REGIONS, get_region"
           python -c "import ast; ast.parse(open('src/scrapers/yandex_maps.py', encoding='utf-8').read())"
           python -c "import ast; ast.parse(open('src/scrapers/gis2.py', encoding='utf-8').read())"

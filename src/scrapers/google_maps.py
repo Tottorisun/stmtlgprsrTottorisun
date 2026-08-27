@@ -13,17 +13,57 @@ D:\\Мои разработки\\RUSIMEX\\leadgen\\Hlebozavody_BY_KZ\\scripts\\h
 Возможны региональные различия — Google по IP может показать другую версию
 интерфейса; при капче/блоке модуль останавливается (SourceBlocked), а не
 подделывает данные.
+
+--- Сверка настроек с RUSIMEX (27.08.2026, по прямому запросу владельца) ---
+Сравнено с gmaps_kz_harvest.py / harvest_gmaps_by_kz.py / harvest_gmaps_uz_az.py /
+gmaps_az.py / gmaps_uz_az_cards.py — все пять используют один и тот же набор
+настроек (не разнобой, значит проверено многократно на разных странах/сессиях),
+взято отсюда:
+
+1. `launch_persistent_context` с сохраняемым профилем вместо
+   `browser.new_context()` "с нуля" каждый запуск — второе было здесь раньше.
+   Постоянный профиль копит cookies/consent/отпечаток браузера между
+   запусками, а не выглядит как "новый браузер" при каждом старте — это
+   явно предпочтённый вариант во всех пяти их скриптах, не единичный случай.
+2. Флаг запуска `--lang=ru` ДОПОЛНИТЕЛЬНО к `locale="ru-RU"` контекста —
+   у них оба сразу, здесь раньше был только locale.
+3. Капча/блок — 3 попытки с бэкоффом (задержка `30 * номер_попытки` секунд)
+   перед тем, как считать источник заблокированным, а не разовая проверка ->
+   сразу SourceBlocked (как было здесь). У них так на КАЖДОЙ навигации
+   (и поиск, и карточка) — часть блоков временная и снимается сама.
+4. Пэйсинг между навигациями 2.0-4.0с (было 1.2-2.5с/1.4-2.2с — заметно
+   быстрее). Их значение проверено на 8 странах СНГ за недели прогонов;
+   моё — только на одном городе одного региона. Беру их цифру, а не жду,
+   пока при масштабировании на всю Тюменскую область/Москву найдётся
+   лимит, которого не было видно на одном городе.
+5. Прокрутка ленты: у них `max_rounds=40`, порог стабильности 4 (было 25/3).
+   Беру их значения — глубже прокрутка стоит немного лишнего времени, а не
+   недобора карточек на больших городах (Москва даст куда больше карточек
+   в ленте, чем Тюмень, на которой изначально подобраны 25/3).
+
+ЧТО НЕ ПЕРЕНЕСЕНО: их двухфазная схема (сначала собрать индекс всех карточек
+по всем городам/запросам, потом отдельно обойти карточки, с чекпоинтами на
+диск после каждых 10) — это инфраструктура для многодневных прогонов по 8+
+странам с возможностью прерывания. Для одного запуска на один регион это
+лишняя сложность без выигрыша: наш прогон занимает минуты, не дни, а
+чекпоинт на диск между городами уже даёт pipeline.py (см. src/pipeline.py) —
+досрочно перенос их checkpoint-файлов сюда не даёт ничего, чего пайплайн не
+делает иначе.
 """
 import re
 import time
 import random
+import pathlib
 from urllib.parse import quote
 
 from .base import SourceBlocked
 
 SEARCH_QUERY = "стоматология"
-MAX_SCROLLS = 25
+MAX_SCROLLS = 40           # RUSIMEX-значение, см. docstring п.5
+STABLE_ROUNDS = 4          # RUSIMEX-значение, см. docstring п.5
 MAX_RESULTS_PER_CITY = 80
+
+PROFILE_DIR = pathlib.Path(__file__).resolve().parents[2] / "data" / "_gmaps_profile"
 
 
 def _is_blocked(page):
@@ -49,6 +89,27 @@ def _handle_consent(page):
         pass
 
 
+def _goto_with_retry(page, url, what, log):
+    """3 попытки с бэкоффом 30*попытка секунд перед выводом о реальном блоке —
+    приём из harvest_gmaps_uz_az.py/gmaps_uz_az_cards.py (см. docstring п.3)."""
+    for attempt in range(1, 4):
+        try:
+            page.goto(url, timeout=45000, wait_until="domcontentloaded")
+        except Exception:
+            if attempt == 3:
+                raise SourceBlocked(f"google_maps: не открылось за 3 попытки ({what})")
+            time.sleep(30 * attempt)
+            continue
+        page.wait_for_timeout(1200)
+        _handle_consent(page)
+        if not _is_blocked(page):
+            return
+        log(f"    [google_maps] капча/блок, попытка {attempt}/3 ({what})")
+        if attempt < 3:
+            time.sleep(30 * attempt)
+    raise SourceBlocked(f"google_maps: капча/блок держится 3 попытки подряд ({what})")
+
+
 def _scroll_feed(page):
     last, stable = -1, 0
     for _ in range(MAX_SCROLLS):
@@ -56,7 +117,7 @@ def _scroll_feed(page):
             page.locator("div[role='feed']").evaluate("el => el.scrollBy(0, el.scrollHeight)")
         except Exception:
             break
-        time.sleep(random.uniform(1.4, 2.2))
+        time.sleep(random.uniform(1.5, 2.4))
         try:
             if page.get_by_text("Вы достигли конца списка").count() > 0:
                 break
@@ -67,7 +128,7 @@ def _scroll_feed(page):
             break
         if cnt == last:
             stable += 1
-            if stable >= 3:
+            if stable >= STABLE_ROUNDS:
                 break
         else:
             stable = 0
@@ -129,11 +190,7 @@ def _parse_card(page, city):
 
 def _search_city(page, city, log):
     url = f"https://www.google.com/maps/search/{quote(SEARCH_QUERY + ' ' + city)}/?hl=ru"
-    page.goto(url, timeout=45000, wait_until="domcontentloaded")
-    page.wait_for_timeout(1500)
-    _handle_consent(page)
-    if _is_blocked(page):
-        raise SourceBlocked(f"google_maps: блок/капча на {page.url[:160]}")
+    _goto_with_retry(page, url, f"поиск {city}", log)
 
     out = []
     if "/maps/place/" in page.url:
@@ -151,14 +208,12 @@ def _search_city(page, city, log):
     hrefs = page.eval_on_selector_all("a.hfpxzc", "els => els.map(e => e.href)")
     log(f"    [google_maps] {city}: карточек в ленте {len(hrefs)}")
     for href in hrefs:
-        page.goto(href, timeout=45000, wait_until="domcontentloaded")
-        page.wait_for_timeout(random.randint(1500, 2500))
-        if _is_blocked(page):
-            raise SourceBlocked(f"google_maps: блок/капча на карточке, {city}")
+        _goto_with_retry(page, href, f"карточка в {city}", log)
         rec = _parse_card(page, city)
         if rec:
             out.append(rec)
-        time.sleep(random.uniform(1.2, 2.0))
+        # 2.0-4.0с — значение из RUSIMEX-скриптов, см. docstring п.4
+        time.sleep(random.uniform(2.0, 4.0))
     return out
 
 
@@ -166,10 +221,17 @@ def scrape_region(region_cfg, log=print):
     from playwright.sync_api import sync_playwright
 
     out = []
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
-        ctx = browser.new_context(locale="ru-RU", viewport={"width": 1440, "height": 900})
-        page = ctx.new_page()
+        # launch_persistent_context вместо launch()+new_context() — см. docstring п.1
+        ctx = pw.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            channel="chrome", headless=False,
+            args=["--disable-blink-features=AutomationControlled", "--disable-quic",
+                  "--window-position=2000,2000", "--lang=ru"],  # --lang=ru: см. docstring п.2
+            locale="ru-RU", viewport={"width": 1440, "height": 900},
+        )
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             for city in region_cfg["cities"]:
                 log(f"  [google_maps] город: {city}")
@@ -179,5 +241,5 @@ def scrape_region(region_cfg, log=print):
                     log(f"  [google_maps] ОСТАНОВКА по блоку: {e}")
                     break
         finally:
-            browser.close()
+            ctx.close()
     return out

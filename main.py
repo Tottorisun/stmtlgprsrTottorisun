@@ -30,6 +30,7 @@ from config.regions import REGIONS, get_region
 from src import db
 from src.pipeline import run_region
 from src.export_xlsx import export_xlsx
+from src.audit_dupes import find_possible_duplicates, format_report
 
 ALL_SOURCES = ["yandex_maps", "2gis", "google_maps"]
 OUT_XLSX = Path(__file__).resolve().parent / "out" / "стоматологии_без_сайта.xlsx"
@@ -44,6 +45,9 @@ def main():
     ap.add_argument("--list-regions", action="store_true")
     ap.add_argument("--export-only", action="store_true",
                      help="не собирать заново — только пересобрать .xlsx из SQLite")
+    ap.add_argument("--audit-only", action="store_true",
+                     help="не собирать заново — только прогнать проверку на возможные "
+                          "дубли (src/audit_dupes.py) по уже накопленной SQLite")
     args = ap.parse_args()
 
     if args.list_regions:
@@ -62,6 +66,16 @@ def main():
         OUT_XLSX.parent.mkdir(parents=True, exist_ok=True)
         export_xlsx(by_region, OUT_XLSX)
         print(f"Пересобрано из SQLite: {len(all_leads)} лидов -> {OUT_XLSX}")
+        return
+
+    if args.audit_only:
+        all_leads = db.fetch_all(conn)
+        by_region = {}
+        for l in all_leads:
+            by_region.setdefault(l["region"], []).append(l)
+        for region_name, region_leads in by_region.items():
+            print(f"\n--- Проверка на возможные дубли: {region_name} ---")
+            format_report(find_possible_duplicates(region_leads))
         return
 
     if not args.regions:
@@ -94,6 +108,14 @@ def main():
     OUT_XLSX.parent.mkdir(parents=True, exist_ok=True)
     export_xlsx(by_region, OUT_XLSX)
     print(f"\n.xlsx обновлён: {OUT_XLSX} (все регионы, накопленные в SQLite: {len(all_leads)} лидов)")
+
+    # Отдельный отчёт-проверка (не сливает автоматически, см. src/audit_dupes.py
+    # и почему так — то же решение, что в audit_dupes_deep2.py у RUSIMEX)
+    for region_id in args.regions:
+        region_cfg = get_region(region_id)
+        region_leads = by_region.get(region_cfg["name"], [])
+        print(f"\n--- Проверка на возможные дубли: {region_cfg['name']} ---")
+        format_report(find_possible_duplicates(region_leads))
 
 
 if __name__ == "__main__":

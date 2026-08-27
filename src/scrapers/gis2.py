@@ -3,22 +3,74 @@
 2ГИС: без Playwright не обойтись. Прямой вызов catalog.api.2gis.ru с публичным
 ключом (тем, что использует сам виджет 2gis.ru, виден в его сетевых запросах)
 пробовался первым — оба известных публичных ключа сейчас отвечают 403
-"key is blocked" / "incorrect key" (проверено 26.08.2026, см. отчёт агента).
-2ГИС, судя по всему, ротирует/блокирует такие ключи по мере их публичного
-использования, так что рабочий способ — открывать страницы как обычный
-браузер и читать данные из window.initialState самой карточки фирмы, точно
-так же, как это делает harvest_2gis_v2.py в проекте RUSIMEX/leadgen/Hlebozavody_BY_KZ.
+"key is blocked" / "incorrect key" (проверено 26.08.2026). 2ГИС, судя по всему,
+ротирует/блокирует такие ключи по мере их публичного использования, так что
+рабочий способ — открывать страницы как обычный браузер и читать данные из
+window.initialState/встроенного JS-состояния карточки фирмы.
 
-ВАЖНО (честно, без подмены данных): с сети, где сейчас работает эта машина,
-2gis.ru отдаёт на любой поисковый запрос жёсткий редирект на
-captcha.2gis.ru/form — "подозрительная активность с вашего IP" (её показывают
-даже headless=False + системный Chrome + все анти-детект флаги). Это не
-частный сбой запроса — это блокировка на уровне сети/IP, обходить капчу
-запрещено правилами задачи. Модуль ниже реализует рабочую технику и годится
-для запуска с российского IP (или после смены сети) — тогда он заработает
-без единой правки. Из текущей сети он вернёт SourceBlocked с понятной
-причиной, что и попадёт в progress.json как честный "gap", а не как 0
-результатов, похожий на "ничего не нашлось".
+--- Сверка настроек с RUSIMEX/leadgen/Hlebozavody_BY_KZ (27.08.2026, по прямому
+запросу владельца) ---
+
+Кроме общей техники (harvest_2gis_v2.py), там нашёлся более свежий и куда
+конкретнее задокументированный приём — scripts/templates/2gis_deep_scan.md,
+проверенный на 2gis.am/az/tj 18-19.08.2026 (harvest_2gis_v2.py от 6.08 —
+на три недели старее). Взято оттуда, с конкретными значениями:
+
+1. РОТАЦИЯ ЗАПРОСА ВМЕСТО ГЛУБОКОЙ ПАГИНАЦИИ ОДНОГО ЗАПРОСА. Симптом блокировки
+   по их описанию: `currentPage` зависает на 1 (или прямая капча) после 4-6
+   страниц ОДНОГО и того же поискового запроса, держится часами. Каждый НОВЫЙ
+   запрос вида /search/<query> даёт свежую страницу 1 — даже если предыдущий
+   запрос той же тематики уже заблокирован. У них процент новых карточек по
+   мере смены запроса: ~90% на 1-м -> ~65% на 2-м -> ~50% на 3-м, дальше не
+   имеет смысла. Раньше здесь был один запрос "стоматология" и до 5 страниц
+   вглубь — именно тот паттерн, который у них ловил блокировку. Ниже —
+   ротация из 3 запросов, каждый не глубже 2 страниц.
+2. ПАУЗА МЕЖДУ ЗАПРОСАМИ КАРТОЧЕК ~2-2.5с — их значение, чтобы не поймать
+   отдельный burst-лимит ("no state" при частых fetch() подряд, не путать с
+   блокировкой пагинации). Было 1.5-2.5с — сузил нижнюю границу до 2.0.
+3. FETCH() ВМЕСТО НАВИГАЦИИ ЗА ДЕТАЛЯМИ КАРТОЧКИ. Их рецепт вместо
+   page.goto() на каждую карточку делает fetch() HTML-страницы карточки прямо
+   в браузерном контексте и регэкспом достаёт встроенное
+   `var initialState = JSON.parse('...')` из тела ответа — задокументировано
+   как более быстрый и надёжный способ, чем клик/навигация. Перенесено ниже
+   (_scrape_card теперь делает это через page.evaluate + fetch, без goto на
+   каждую карточку).
+
+ЧТО НЕ ПЕРЕНЕСЕНО и почему: их рецепт использует префикс `/ru/` в URL
+(`2gis.<TLD>/ru/<city>/firm/<id>`) — но это специфика TLD, где русский язык
+не язык по умолчанию (2gis.am/az/tj). У 2gis.ru (наш случай) русский и так
+язык по умолчанию, и более старый harvest_2gis_v2.py для 2gis.kz/by/ru тоже
+не использует `/ru/` в пути — слепо копировать чужой префикс сюда значило бы
+сломать рабочий URL ради приёма, решающего не нашу проблему. Оставлен прежний
+путь без `/ru/`.
+
+--- ГЛАВНОЕ: это НЕ чинит блокировку с этой сети ---
+
+С сети, где сейчас работает эта машина, 2gis.ru отдаёт на любой запрос —
+включая голый /tyumen без единого поиска — жёсткий редирект на
+captcha.2gis.ru/form, "подозрительная активность с вашего IP" (проверено и
+через Playwright, и напрямую через requests). Проверено также 27.08.2026:
+ТА ЖЕ блокировка одинаково срабатывает на 2gis.kz и 2gis.by с этой же сети —
+это не особенность именно российского домена, блок именно по IP/сети целиком,
+на уровне всей платформы 2ГИС. Симптом иной, чем в 2gis_deep_scan.md (там —
+блокировка вглубь ОДНОГО запроса после нескольких страниц, снимается сменой
+запроса; здесь — блокировка с первого же запроса, ротация запроса не поможет).
+
+Прокси/VPN-инфраструктуры в коде и документах RUSIMEX НЕ найдено — весь код
+там (все *2gis*.py, QUALITY_RULES.md) работает через обычный Playwright +
+системный Chrome, без единого упоминания proxy/VPN/резидентных IP. Значит,
+там просто не пытались обойти сетевой блок таким способом (или он им не
+встречался на их тогдашней сети). Единственная явная зацепка по времени: их
+рабочие подтверждения по 2GIS датированы 6-19.08.2026, а сегодняшний блок
+(27.08.2026) — сплошной и с первого запроса. Похоже на то, что IP/сеть этой
+машины со временем накопили блокировку у 2ГИС (не исключено, что как раз от
+объёма прошлого проекта) — а не на то, что 2ГИС в принципе не пускает эту
+страну/провайдера. Практический вывод для владельца: нужен другой исходящий
+IP (другая сеть, смена VPN-выхода, или резидентный прокси, если будет
+заведён) — это ТРЕБОВАНИЕ, не пожелание, и не то же самое, что "подождать
+российский IP": дело не в геолокации самой по себе, а в репутации конкретного
+IP у антифрод-системы 2ГИС. Код ниже рабочий и не трогать его не придётся —
+достаточно сменить сеть.
 """
 import re
 import time
@@ -26,8 +78,37 @@ import random
 
 from .base import SourceBlocked
 
-SEARCH_QUERY = "стоматология"
-MAX_PAGES = 5
+# Ротация вместо одного запроса + глубокой пагинации (см. docstring, п.1)
+QUERIES = ["стоматология", "стоматологическая клиника", "зубной врач"]
+MAX_PAGES_PER_QUERY = 2
+
+FIND_STATE_JS = r"""
+async (url) => {
+    function findStateCode(html) {
+        const marker = "var initialState = JSON.parse('";
+        const startIdx = html.indexOf(marker);
+        if (startIdx < 0) return null;
+        let i = startIdx + marker.length;
+        while (i < html.length) {
+            if (html[i] === '\\') { i += 2; continue; }
+            if (html[i] === "'") { i += 1; break; }
+            i += 1;
+        }
+        return html.slice(startIdx + "var initialState = ".length, i + 2);
+    }
+    try {
+        const resp = await fetch(url);
+        const finalUrl = resp.url || url;
+        const html = await resp.text();
+        const code = findStateCode(html);
+        if (!code) return {error: "no state", finalUrl, htmlHead: html.slice(0, 200)};
+        const state = new Function('return ' + code)();
+        return {state, finalUrl};
+    } catch (e) {
+        return {error: String(e)};
+    }
+}
+"""
 
 
 def _open_browser(pw):
@@ -45,47 +126,61 @@ def _check_blocked(page):
         raise SourceBlocked(f"2gis: капча/блок на {u[:160]}")
 
 
-def _collect_firm_ids(page, city_slug, query):
-    ids = []
-    for page_n in range(1, MAX_PAGES + 1):
-        url = f"https://2gis.ru/{city_slug}/search/{query}"
-        if page_n > 1:
-            url += f"/page/{page_n}"
-        page.goto(url, timeout=45000, wait_until="domcontentloaded")
-        page.wait_for_timeout(random.randint(3000, 4500))
-        _check_blocked(page)
-        hrefs = page.eval_on_selector_all(
-            "a[href*='/firm/']", "els => els.map(e => e.getAttribute('href'))")
-        new = 0
-        for h in hrefs:
-            m = re.search(r"/firm/(\d+)", h or "")
-            if m and m.group(1) not in ids:
-                ids.append(m.group(1))
-                new += 1
-        if new == 0:
-            break
-        time.sleep(random.uniform(1.2, 2.2))
-    return ids
+def _collect_firm_ids(page, city_slug, seen_ids):
+    """Ротация по QUERIES, максимум MAX_PAGES_PER_QUERY страниц на запрос
+    (см. docstring, п.1 — глубже означает риск поймать блокировку пагинации)."""
+    new_ids = []
+    for query in QUERIES:
+        query_new = 0
+        for page_n in range(1, MAX_PAGES_PER_QUERY + 1):
+            url = f"https://2gis.ru/{city_slug}/search/{query}"
+            if page_n > 1:
+                url += f"/page/{page_n}"
+            page.goto(url, timeout=45000, wait_until="domcontentloaded")
+            page.wait_for_timeout(random.randint(3000, 4500))
+            _check_blocked(page)
+            hrefs = page.eval_on_selector_all(
+                "a[href*='/firm/']", "els => els.map(e => e.getAttribute('href'))")
+            page_new = 0
+            for h in hrefs:
+                m = re.search(r"/firm/(\d+)", h or "")
+                if m and m.group(1) not in seen_ids:
+                    seen_ids.add(m.group(1))
+                    new_ids.append(m.group(1))
+                    page_new += 1
+            query_new += page_new
+            if page_new == 0:
+                break
+            time.sleep(random.uniform(1.2, 2.2))
+        # query_new == 0 на первой странице -> либо тема пуста в этом городе,
+        # либо именно этот запрос уже заблокирован вглубь — следующий запрос
+        # в ротации всё равно пробуем, он даёт свежую страницу 1 (см. docstring, п.1)
+    return new_ids
 
 
 def _scrape_card(page, city_slug, fid):
+    """fetch() + разбор встроенного состояния вместо page.goto() на карточку —
+    приём из 2gis_deep_scan.md (см. docstring, п.3): быстрее и надёжнее клика/
+    навигации, задокументировано как проверенное на живых данных 18-19.08.2026."""
     url = f"https://2gis.ru/{city_slug}/firm/{fid}"
-    page.goto(url, timeout=45000, wait_until="domcontentloaded")
-    page.wait_for_timeout(random.randint(2000, 3000))
-    _check_blocked(page)
-    item = page.evaluate("""(fid) => {
-        try {
-            const prof = (window.initialState || {}).data?.entity?.profile || {};
-            let rec = prof[fid]?.data;
-            if (!rec) {
-                for (const v of Object.values(prof)) {
-                    const d = v && v.data;
-                    if (d && String(d.id || '').startsWith(fid)) { rec = d; break; }
-                }
-            }
-            return rec || null;
-        } catch (e) { return null; }
-    }""", fid)
+    result = page.evaluate(FIND_STATE_JS, url)
+    if result.get("error"):
+        return None
+    final_url = result.get("finalUrl") or url
+    if "captcha.2gis.ru" in final_url or "/museum" in final_url:
+        raise SourceBlocked(f"2gis: капча/блок на {final_url[:160]}")
+    state = result.get("state") or {}
+    try:
+        profile = state["data"]["entity"]["profile"]
+    except (KeyError, TypeError):
+        return None
+    item = (profile.get(fid) or {}).get("data")
+    if not item:
+        for v in profile.values():
+            d = (v or {}).get("data")
+            if d and str(d.get("id", "")).startswith(fid):
+                item = d
+                break
     if not item:
         return None
     phones, emails, has_site = [], [], False
@@ -153,13 +248,15 @@ def scrape_region(region_cfg, log=print):
             for city in region_cfg["cities"]:
                 slug = _slugify_city(city)
                 log(f"  [2gis] город: {city} (slug={slug})")
-                ids = _collect_firm_ids(page, slug, SEARCH_QUERY)
+                seen_ids = set()
+                ids = _collect_firm_ids(page, slug, seen_ids)
                 log(f"  [2gis] {city}: найдено карточек {len(ids)}")
                 for fid in ids:
                     rec = _scrape_card(page, slug, fid)
                     if rec:
                         out.append(rec)
-                    time.sleep(random.uniform(1.5, 2.5))
+                    # 2.0-2.5с — значение из 2gis_deep_scan.md (см. docstring, п.2)
+                    time.sleep(random.uniform(2.0, 2.5))
         finally:
             browser.close()
     return out
