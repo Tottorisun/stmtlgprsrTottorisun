@@ -40,7 +40,18 @@ from src.export_xlsx import export_xlsx
 from src.audit_dupes import find_possible_duplicates, format_report
 
 ALL_SOURCES = ["yandex_maps", "2gis", "google_maps"]
-OUT_XLSX = Path(__file__).resolve().parent / "out" / "стоматологии_без_сайта.xlsx"
+ROOT = Path(__file__).resolve().parent
+OUT_XLSX = ROOT / "out" / "стоматологии_без_сайта.xlsx"
+
+# Разворот 28.08.2026: режим has-site (клиники С сайтом + захват URL для аудита
+# соответствия сайта закону) по умолчанию пишет в ОТДЕЛЬНУЮ базу/файл, чтобы не
+# перезаписать боевую no-site базу на 1905 лидов (она остаётся как fallback).
+MODE_DEFAULTS = {
+    "no-site":  {"db": ROOT / "data" / "leads.sqlite3",
+                 "xlsx": ROOT / "out" / "стоматологии_без_сайта.xlsx"},
+    "has-site": {"db": ROOT / "data" / "leads_with_site.sqlite3",
+                 "xlsx": ROOT / "out" / "стоматологии_с_сайтом.xlsx"},
+}
 
 
 def main():
@@ -49,6 +60,13 @@ def main():
                      help="id региона из config/regions.py (можно указать несколько раз)")
     ap.add_argument("--sources", default=",".join(ALL_SOURCES),
                      help=f"через запятую, из {ALL_SOURCES}")
+    ap.add_argument("--mode", default="no-site", choices=["no-site", "has-site"],
+                     help="no-site (по умолчанию): клиники БЕЗ сайта — старая цель. "
+                          "has-site: клиники С сайтом + захват URL сайта в лид, для "
+                          "последующего аудита сайта на соответствие закону "
+                          "(python audit_sites.py). Режимы пишут в РАЗНЫЕ базы по "
+                          "умолчанию (data/leads.sqlite3 vs data/leads_with_site.sqlite3) — "
+                          "боевая no-site база не перезаписывается.")
     ap.add_argument("--list-regions", action="store_true")
     ap.add_argument("--export-only", action="store_true",
                      help="не собирать заново — только пересобрать .xlsx из SQLite")
@@ -75,7 +93,11 @@ def main():
             print(f"{rid:12s} {cfg['name']:28s} [{flag}]  города: {', '.join(cfg['cities'])}")
         return
 
-    conn = db.connect(args.db_path)
+    # База/xlsx по умолчанию зависят от режима (см. MODE_DEFAULTS): режим has-site
+    # не должен перезаписать боевую no-site базу. Явный --db-path (для параллельных
+    # запусков) перекрывает дефолт режима.
+    mode_default = MODE_DEFAULTS[args.mode]
+    conn = db.connect(args.db_path or mode_default["db"])
     # При --db-path .xlsx тоже уводим в отдельный файл рядом с этой базой —
     # иначе несколько параллельных запусков (изолированные --db-path, но общий
     # OUT_XLSX по умолчанию) наступили бы на тот же риск одновременной записи,
@@ -84,9 +106,10 @@ def main():
         db_path_obj = Path(args.db_path)
         out_xlsx = db_path_obj.with_suffix(".xlsx")
         print(f"[!] Отдельная база: {db_path_obj} -> .xlsx: {out_xlsx} "
-              f"(не data/leads.sqlite3 / out/*.xlsx по умолчанию)")
+              f"(не дефолтная база режима {args.mode!r} / out/*.xlsx)")
     else:
-        out_xlsx = OUT_XLSX
+        out_xlsx = mode_default["xlsx"]
+    print(f"[режим: {args.mode}] база: {args.db_path or mode_default['db']}")
 
     if args.export_only:
         all_leads = db.fetch_all(conn)
@@ -132,14 +155,21 @@ def main():
             # копия конфига, а не правка REGIONS — глобальный конфиг не мутируем
             region_cfg = dict(region_cfg, cities=[c for c in region_cfg["cities"] if c in wanted])
             print(f"[!] --cities: только {region_cfg['cities']}")
-        print(f"\n=== Регион: {region_cfg['name']} ({region_id}) | источники: {sources} ===")
-        leads, stats = run_region(region_id, region_cfg, sources, conn)
+        print(f"\n=== Регион: {region_cfg['name']} ({region_id}) | источники: {sources} "
+              f"| режим: {args.mode} ===")
+        leads, stats = run_region(region_id, region_cfg, sources, conn, mode=args.mode)
         all_stats[region_cfg["name"]] = stats
-        print(f"[{region_cfg['name']}] итог: собрано сырых записей={stats['raw_total']}, "
-              f"прошли фильтр 'это стоматология'={stats['dental_filtered']}, "
-              f"из них без сайта={stats['no_website']}, "
-              f"с телефоном и/или email={stats['with_contact']}, "
-              f"после слияния дублей -> лидов в базе={stats['final_leads']}")
+        if args.mode == "has-site":
+            print(f"[{region_cfg['name']}] итог: собрано сырых записей={stats['raw_total']}, "
+                  f"прошли фильтр 'это стоматология'={stats['dental_filtered']}, "
+                  f"из них С сайтом (URL захвачен)={stats['with_website']}, "
+                  f"после слияния дублей -> лидов в базе={stats['final_leads']}")
+        else:
+            print(f"[{region_cfg['name']}] итог: собрано сырых записей={stats['raw_total']}, "
+                  f"прошли фильтр 'это стоматология'={stats['dental_filtered']}, "
+                  f"из них без сайта={stats['no_website']}, "
+                  f"с телефоном и/или email={stats['with_contact']}, "
+                  f"после слияния дублей -> лидов в базе={stats['final_leads']}")
 
     all_leads = db.fetch_all(conn)
     by_region = {}

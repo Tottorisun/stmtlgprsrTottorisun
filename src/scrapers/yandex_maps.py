@@ -92,11 +92,25 @@ def _fetch_page(sess, query, page):
     return None
 
 
+def _first_url(urls):
+    """urls из карточки Яндекса — список; элемент бывает строкой или dict
+    ({'url': ...}/{'value': ...}). Возвращаем первый непустой URL строкой ("")."""
+    for u in urls or []:
+        if isinstance(u, str) and u.strip():
+            return u.strip()
+        if isinstance(u, dict):
+            v = u.get("url") or u.get("value") or u.get("href")
+            if v and str(v).strip():
+                return str(v).strip()
+    return ""
+
+
 def _extract(item, city, source_url):
     if not item.get("id"):
         return None  # редакционные вставки в выдаче ("Стоматологии в ... : обзор") — не организация
     cats = [c.get("name") for c in (item.get("categories") or []) if c.get("name")]
     urls = item.get("urls") or []
+    website = _first_url(urls)
     phones = [p.get("value") or p.get("number") for p in (item.get("phones") or [])]
     return {
         "name": item.get("shortTitle") or item.get("title") or "",
@@ -105,7 +119,8 @@ def _extract(item, city, source_url):
         "address": item.get("fullAddress") or "",
         "phones_raw": [p for p in phones if p],
         "emails_raw": [],  # Яндекс.Карты email в карточке организации не публикует
-        "has_website": bool(urls and urls[0]),
+        "has_website": bool(website),
+        "website": website,
         "source": "yandex_maps",
         "source_url": source_url,
     }

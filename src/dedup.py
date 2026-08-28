@@ -42,6 +42,8 @@ def merge_raw_leads(rows, region_name, log=print):
                 g["phone"] = (g["phone"] + "; " + r["phone"]).strip("; ") if g["phone"] else r["phone"]
             if r["email"] and not g["email"]:
                 g["email"] = r["email"]
+            if r.get("website") and not g.get("website"):
+                g["website"] = r["website"]
             if not g["address"] and r["address"]:
                 g["address"] = r["address"]
             for c in r["categories"]:
@@ -96,6 +98,8 @@ def merge_raw_leads(rows, region_name, log=print):
                 base["phone"] = (base["phone"] + "; " + g["phone"]).strip("; ") if base["phone"] else g["phone"]
             if g["email"] and not base["email"]:
                 base["email"] = g["email"]
+            if g.get("website") and not base.get("website"):
+                base["website"] = g["website"]
             for c in g["categories"]:
                 if c not in base["categories"]:
                     base["categories"].append(c)

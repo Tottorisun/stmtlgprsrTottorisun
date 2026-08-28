@@ -54,38 +54,70 @@ def _get_scraper(name):
     return SCRAPERS[name]
 
 
-def _prepare_and_merge(raw_records, region_name, city, stats, log):
-    """Нормализация + фильтр 'это стоматология' + 'без сайта' + 'есть контакт',
-    затем дедуп ВНУТРИ этой пачки (один город, все запрошенные источники)."""
+def _prepare_and_merge(raw_records, region_name, city, stats, log, mode="no-site"):
+    """Нормализация + фильтр 'это стоматология' + фильтр по режиму + дедуп
+    ВНУТРИ этой пачки (один город, все запрошенные источники).
+
+    mode:
+      "no-site"  — старое поведение: оставляем клиники БЕЗ сайта, требуем
+                   телефон/email (иначе лид непригоден для обхода). Критерий
+                   отбора — отсутствие сайта.
+      "has-site" — разворот 28.08.2026: оставляем клиники, У КОТОРЫХ САЙТ ЕСТЬ,
+                   и забираем сам URL в лид (для последующего аудита сайта на
+                   соответствие закону, src/site_audit.py). Телефон/email НЕ
+                   обязателен: ключевой актив тут — адрес сайта, контакт для
+                   письма позже находится на самом сайте; телефон с карточки
+                   сохраняем, если он есть.
+    """
     prepared = []
     for r in raw_records:
         if not is_dental_clinic(r["name"], r["categories"]):
             continue
         stats["dental_filtered"] += 1
-        if r["has_website"]:
-            continue
-        stats["no_website"] += 1
         phones = sorted(set(p for p in (normalize_phone(x) for x in r["phones_raw"]) if p))
         emails = sorted(set(e for e in (clean_email(x) for x in r["emails_raw"]) if e))
-        if not phones and not emails:
-            continue
-        stats["with_contact"] += 1
-        prepared.append({
-            "name": r["name"], "categories": r["categories"], "city": r["city"],
-            "address": r["address"], "phone": "; ".join(phones),
-            "email": emails[0] if emails else "", "has_website": False,
-            "source": r["source"], "source_url": r["source_url"],
-        })
+
+        if mode == "has-site":
+            website = (r.get("website") or "").strip()
+            if not (r["has_website"] and website):
+                continue
+            stats["with_website"] += 1
+            prepared.append({
+                "name": r["name"], "categories": r["categories"], "city": r["city"],
+                "address": r["address"], "phone": "; ".join(phones),
+                "email": emails[0] if emails else "", "has_website": True,
+                "website": website,
+                "source": r["source"], "source_url": r["source_url"],
+            })
+        else:  # no-site
+            if r["has_website"]:
+                continue
+            stats["no_website"] += 1
+            if not phones and not emails:
+                continue
+            stats["with_contact"] += 1
+            prepared.append({
+                "name": r["name"], "categories": r["categories"], "city": r["city"],
+                "address": r["address"], "phone": "; ".join(phones),
+                "email": emails[0] if emails else "", "has_website": False,
+                "website": "",
+                "source": r["source"], "source_url": r["source_url"],
+            })
     return merge_raw_leads(prepared, f"{region_name} / {city}", log=log)
 
 
-def run_region(region_id, region_cfg, sources, conn, log=print):
+def run_region(region_id, region_cfg, sources, conn, log=print, mode="no-site"):
     """Возвращает (leads: list[dict по models.FIELDS], stats: dict).
+
+    mode — см. _prepare_and_merge: "no-site" (клиники без сайта, старое
+    поведение) или "has-site" (клиники С сайтом + захват URL, разворот
+    28.08.2026). Всё остальное — фильтр 'это стоматология', телефон, дедуп,
+    чек-пойнт по городам — одинаково в обоих режимах.
 
     Чек-пойнт по городам: после каждого города — commit в conn. Если что-то
     падает посреди региона, уже обработанные города остаются в базе."""
     stats = {"raw_by_source": {}, "raw_total": 0, "dental_filtered": 0,
-             "no_website": 0, "with_contact": 0, "final_leads": 0}
+             "no_website": 0, "with_website": 0, "with_contact": 0, "final_leads": 0}
     modules = {src: _get_scraper(src) for src in sources}
 
     sessions = {}
@@ -129,7 +161,7 @@ def run_region(region_id, region_cfg, sources, conn, log=print):
                 raw_city.extend(raw)
             stats["raw_total"] += len(raw_city)
 
-            merged_city = _prepare_and_merge(raw_city, region_cfg["name"], city, stats, log)
+            merged_city = _prepare_and_merge(raw_city, region_cfg["name"], city, stats, log, mode=mode)
             stats["final_leads"] += len(merged_city)
 
             scraped_at = db.now_iso()
@@ -143,7 +175,8 @@ def run_region(region_id, region_cfg, sources, conn, log=print):
                     "address": m["address"],
                     "phone": m["phone"],
                     "email": m["email"],
-                    "has_website": 0,
+                    "has_website": 1 if mode == "has-site" else 0,
+                    "website": m.get("website", ""),
                     "source": "; ".join(sorted(m["sources"])),
                     "source_url": "; ".join(m["source_urls"]),
                     "scraped_at": scraped_at,

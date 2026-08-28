@@ -21,6 +21,7 @@ HDR_RU = {
     "phone": "Телефон(ы)",
     "email": "Email",
     "has_website": "Есть сайт",
+    "website": "Сайт (URL)",
     "source": "Источник(и)",
     "source_url": "Ссылка(и) на карточку",
     "scraped_at": "Собрано",
@@ -28,8 +29,8 @@ HDR_RU = {
 }
 WIDTHS = {
     "dedupe_key": 10, "org_name": 30, "category": 22, "region": 18, "city": 14,
-    "address": 34, "phone": 20, "email": 22, "has_website": 10, "source": 16,
-    "source_url": 40, "scraped_at": 18, "notes": 24,
+    "address": 34, "phone": 20, "email": 22, "has_website": 10, "website": 34,
+    "source": 16, "source_url": 40, "scraped_at": 18, "notes": 24,
 }
 HDR_FILL = PatternFill("solid", fgColor="2F5597")
 HDR_FONT = Font(name="Arial", size=10, bold=True, color="FFFFFF")
@@ -42,7 +43,8 @@ def _write_sheet(wb, title, rows):
     ws.append([HDR_RU[f] for f in FIELDS])
     for r in rows:
         row = [r.get(f) for f in FIELDS]
-        row[FIELDS.index("has_website")] = "нет"  # база по построению — только без сайта
+        # Показываем фактическое значение: no-site база -> "нет", has-site -> "да".
+        row[FIELDS.index("has_website")] = "да" if r.get("has_website") else "нет"
         ws.append(row)
     for c in ws[1]:
         c.fill, c.font = HDR_FILL, HDR_FONT
@@ -60,7 +62,7 @@ def _write_sheet(wb, title, rows):
 
 def _write_summary(wb, rows_by_region):
     ws = wb.create_sheet("Сводка", 0)
-    ws.append(["Регион", "Лидов (без сайта)", "Есть телефон", "Есть email", "Только email (без тел.)"])
+    ws.append(["Регион", "Лидов", "Есть телефон", "Есть email", "Только email (без тел.)"])
     for c in ws[1]:
         c.fill, c.font = HDR_FILL, HDR_FONT
         c.alignment = Alignment(horizontal="center")

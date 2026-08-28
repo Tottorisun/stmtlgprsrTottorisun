@@ -183,7 +183,7 @@ def _scrape_card(page, city_slug, fid):
                 break
     if not item:
         return None
-    phones, emails, has_site = [], [], False
+    phones, emails, website = [], [], ""
     for g in item.get("contact_groups") or []:
         for c in g.get("contacts") or []:
             t = c.get("type")
@@ -192,8 +192,9 @@ def _scrape_card(page, city_slug, fid):
                 phones.append(v)
             elif t == "email" and v:
                 emails.append(v)
-            elif t == "website" and v:
-                has_site = True
+            elif t == "website" and v and not website:
+                website = str(v).strip()  # сам URL, не только факт наличия (режим has-site)
+    has_site = bool(website)
     city_name = ""
     for a in item.get("adm_div") or []:
         if a.get("type") == "city" and a.get("name"):
@@ -209,6 +210,7 @@ def _scrape_card(page, city_slug, fid):
         "phones_raw": phones,
         "emails_raw": emails,
         "has_website": has_site,
+        "website": website,
         "source": "2gis",
         "source_url": url,
     }

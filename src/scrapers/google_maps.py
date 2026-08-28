@@ -193,6 +193,7 @@ def _parse_card(page, city):
         "phones_raw": phones,
         "emails_raw": [],
         "has_website": has_site,
+        "website": website if has_site else "",  # сам URL для режима has-site
         "source": "google_maps",
         "source_url": page.url,
     }

@@ -59,8 +59,21 @@ def backup_main_db(main_path):
 def read_leads(path):
     conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)  # источник только читаем
     try:
-        cur = conn.execute(f"SELECT {', '.join(FIELDS)} FROM leads")
-        return [dict(zip(FIELDS, row)) for row in cur.fetchall()]
+        # Базы-источники могут быть созданы РАЗНЫМИ версиями схемы (напр. без
+        # добавленной позже колонки website) — открыты read-only, дозавести
+        # ALTER'ом нельзя. Берём пересечение FIELDS с фактическими колонками,
+        # недостающие поля добираем как "" — merge остаётся работоспособным
+        # на старых базах параллельного флота.
+        have = {r[1] for r in conn.execute("PRAGMA table_info(leads)").fetchall()}
+        cols = [f for f in FIELDS if f in have]
+        cur = conn.execute(f"SELECT {', '.join(cols)} FROM leads")
+        out = []
+        for row in cur.fetchall():
+            rec = dict(zip(cols, row))
+            for f in FIELDS:
+                rec.setdefault(f, "")
+            out.append(rec)
+        return out
     finally:
         conn.close()
 
