@@ -17,9 +17,10 @@ CLI: собрать лиды (стоматологии без сайта) по �
     python main.py --region moscow --sources yandex_maps --db-path data/parallel/moscow.sqlite3
 
 По умолчанию источники: yandex_maps,2gis,google_maps (порядок = приоритет из ТЗ).
-2gis и google_maps требуют Playwright + системный Chrome и открывают видимое
-окно браузера (headless=False — так меньше похоже на бота). yandex_maps не
-требует ни того, ни другого.
+Браузер (Playwright + системный Chrome, видимое окно, headless=False — так меньше
+похоже на бота) нужен только для google_maps. yandex_maps и 2gis ходят обычными
+HTTP-запросами через curl_cffi и браузера не требуют — по 2ГИС это изменилось
+29.08.2026, см. README, раздел "2ГИС: ошибочный диагноз и его исправление".
 """
 import argparse
 import sys

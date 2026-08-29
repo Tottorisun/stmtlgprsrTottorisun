@@ -33,19 +33,40 @@ try/except и переходит к следующему, а не роняет �
 yandex.ru молча редиректит на yandex.com/maps, но при этом всё равно отдаёт
 российскую выдачу (see report) — Accept-Language: ru-RU этого достаточно.
 Если запускать с российского IP, редиректа не будет — код одинаково работает
-в обоих случаях, редирект не разрывает сессию (requests сам идёт за Location).
+в обоих случаях, редирект не разрывает сессию (клиент сам идёт за Location).
+
+--- Смена HTTP-клиента на curl_cffi (29.08.2026): страховка, а не починка ---
+
+Здесь ничего не было сломано — Яндекс отдавал и отдаёт данные обычным
+`requests`. Заменён только транспорт, на тот же клиент, которым 29.08.2026
+открыли 2ГИС (см. src/scrapers/gis2.py и AI_CONTEXT/TASKS/SCRAPLING_EVAL.md):
+у 2ГИС проверка шла по ОТПЕЧАТКУ TLS/HTTP2 (JA3/JA4) клиента, и обычный
+`requests` не проходил её ни с какими заголовками. Яндекс может включить
+такую же проверку в любой день; перевести клиент заранее — дешевле, чем
+чинить по факту потери источника.
+
+Что НЕ менялось: пэйсинг (4.0-6.5с / 3.5-5.5с, значения RUSIMEX), глубина
+пагинации (8 страниц), разбор `state-view`, устойчивость по городам,
+определение капчи. Транспорт быстрее не стал и не должен — паузы прежние.
+
+Из заголовков намеренно убраны свой User-Agent и Accept: их теперь выдаёт
+профиль имперсонации, согласованно с TLS-отпечатком. Держать вручную
+прописанный Chrome/128 поверх отпечатка другой версии — это ровно то
+рассогласование, которое такие проверки и ищут. Accept-Language: ru-RU
+оставлен: он не про маскировку, а про язык выдачи (см. замечание по гео выше).
 """
 import re
 import json
 import time
 import random
+import urllib.parse
 
-import requests
+from curl_cffi import requests as curl_requests
 
 from .base import SourceBlocked
 
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+# Профиль браузера для подделки TLS/HTTP2-отпечатка (см. docstring)
+IMPERSONATE = "chrome"
 
 QUERIES = ["стоматология", "стоматологическая клиника", "детская стоматология", "зубной врач"]
 MAX_PAGES_PER_QUERY = 8
@@ -60,12 +81,8 @@ def open_session(log=print):
     на каждый город — интерфейс единый с gis2.py/google_maps.py, где сессия
     (открытый браузер) реально дорогая и НЕ пересоздаётся на каждый город,
     см. 27.08.2026, чек-пойнт по городам в src/pipeline.py)."""
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    })
+    s = curl_requests.Session(impersonate=IMPERSONATE)
+    s.headers.update({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
     return s
 
 
@@ -74,15 +91,18 @@ def close_session(session):
 
 
 def _fetch_page(sess, query, page):
-    url = "https://yandex.ru/maps/?text=" + requests.utils.quote(query)
+    url = "https://yandex.ru/maps/?text=" + urllib.parse.quote(query)
     if page > 1:
         url += f"&page={page}"
     r = sess.get(url, timeout=40)
     if r.status_code in (403, 429):
         raise SourceBlocked(f"yandex_maps: HTTP {r.status_code} на {url[:100]}")
-    if "showcaptcha" in r.url or "SmartCaptcha" in r.text[:6000]:
-        raise SourceBlocked(f"yandex_maps: капча на {r.url[:120]}")
-    m = STATE_VIEW_RE.search(r.text)
+    # Яндекс отдаёт UTF-8; декодируем явно, а не полагаемся на угадывание —
+    # ошибка кодировки здесь молча уехала бы мусором в названия/адреса.
+    text = r.content.decode("utf-8", "replace")
+    if "showcaptcha" in (r.url or "") or "SmartCaptcha" in text[:6000]:
+        raise SourceBlocked(f"yandex_maps: капча на {(r.url or url)[:120]}")
+    m = STATE_VIEW_RE.search(text)
     if not m:
         return None
     data = json.loads(m.group(1))

@@ -1,12 +1,57 @@
 # -*- coding: utf-8 -*-
 """
-2ГИС: без Playwright не обойтись. Прямой вызов catalog.api.2gis.ru с публичным
-ключом (тем, что использует сам виджет 2gis.ru, виден в его сетевых запросах)
-пробовался первым — оба известных публичных ключа сейчас отвечают 403
-"key is blocked" / "incorrect key" (проверено 26.08.2026). 2ГИС, судя по всему,
-ротирует/блокирует такие ключи по мере их публичного использования, так что
-рабочий способ — открывать страницы как обычный браузер и читать данные из
-window.initialState/встроенного JS-состояния карточки фирмы.
+2ГИС: обычный HTTP-запрос через curl_cffi с имперсонацией браузерного
+TLS-отпечатка. Ни Playwright, ни браузера не нужно — серверный HTML (SSR)
+2gis.ru уже содержит всё состояние страницы в `var initialState = JSON.parse('...')`,
+и по поисковой выдаче, и по карточке фирмы.
+
+Прямой вызов catalog.api.2gis.ru с публичным ключом (тем, что использует сам
+виджет 2gis.ru) пробовался первым — оба известных публичных ключа отвечают 403
+"key is blocked" / "incorrect key" (проверено 26.08.2026). 2ГИС ротирует/блокирует
+такие ключи по мере их публичного использования, так что рабочий способ —
+запрашивать обычные страницы сайта и читать встроенное состояние.
+
+--- ГЛАВНОЕ: чем на самом деле был "блок 2ГИС" (исправление 29.08.2026) ---
+
+ЧТО ЗДЕСЬ БЫЛО НАПИСАНО РАНЬШЕ (и было НЕВЕРНО): "блок именно по IP/сети
+целиком", "нужен другой исходящий IP — это ТРЕБОВАНИЕ", "репутация конкретного
+IP у антифрод-системы 2ГИС". Вывод был сделан 27.08.2026 из того, что и
+Playwright, и голый `requests` с этой сети получали редирект на
+`2gis.ru/museum` → капчу на ПЕРВОМ же запросе, включая голую `2gis.ru/tyumen`
+без единого поиска, и одинаково на 2gis.ru, 2gis.kz и 2gis.by.
+
+ЧТО ОКАЗАЛОСЬ НА САМОМ ДЕЛЕ (проверено 29.08.2026, отчёт
+AI_CONTEXT/TASKS/SCRAPLING_EVAL.md). Блокировка была по ОТПЕЧАТКУ TLS/HTTP2
+(JA3/JA4) HTTP-клиента, а не по IP и не по заголовкам. Три замера подряд,
+в одну минуту, с одного и того же IP этой машины:
+
+| Как ходим                                                  | Что вернулось                     |
+|------------------------------------------------------------|-----------------------------------|
+| `requests`, обычные заголовки                                | `2gis.ru/museum`, 11 КБ           |
+| `requests` + полный набор браузерных заголовков (UA, Sec-Ch-Ua, Sec-Fetch-*, Referer) | `2gis.ru/museum`, 4 КБ |
+| `curl_cffi` c `impersonate="chrome"`, минимальные заголовки  | `2gis.ru/tyumen`, 566 КБ, `initialState` на месте |
+
+Контроль: сразу ПОСЛЕ успеха обычный `requests` в ту же минуту снова получил
+заглушку — значит дело в клиенте, а не в том, что блок "сам отпустил".
+Идеальные браузерные заголовки НЕ помогли — значит дело и не в них.
+
+ПОЧЕМУ ОШИБЛИСЬ. Наблюдения были верные (блок с первого запроса, на всех TLD,
+и через Playwright, и через requests), а вывод из них — нет. "Одинаково на
+всех доменах и с первого запроса" честно исключает домен/TLD и исключает
+пагинационный лимит, но НЕ различает IP и клиента: обе гипотезы объясняют
+ровно эти симптомы. Проверку, которая их различает (тот же IP, та же минута,
+ДРУГОЙ клиент), тогда не сделали — сразу выбрали IP. Playwright не был
+контрпримером: браузерная автоматизация оставляет собственные следы и тоже
+не проходила, что лишь укрепило неверный вывод.
+
+ПРАКТИЧЕСКИЙ ВЫВОД: прокси, резидентные IP и смена сети ради 2ГИС НЕ НУЖНЫ.
+Не покупать. Источник работает с этой самой сети — нужен только клиент,
+который здоровается как браузер.
+
+ЧЕГО МЫ НЕ ДЕЛАЕМ: капчу не решаем и не обходим. 2ГИС нам её просто ни разу
+не показал — он отдал обычную страницу. Если когда-нибудь покажет (или снова
+уведёт на /museum), модуль честно останавливается через SourceBlocked, как и
+раньше, а не пытается пройти проверку.
 
 --- Сверка настроек с RUSIMEX/leadgen/Hlebozavody_BY_KZ (27.08.2026, по прямому
 запросу владельца) ---
@@ -14,7 +59,8 @@ window.initialState/встроенного JS-состояния карточк�
 Кроме общей техники (harvest_2gis_v2.py), там нашёлся более свежий и куда
 конкретнее задокументированный приём — scripts/templates/2gis_deep_scan.md,
 проверенный на 2gis.am/az/tj 18-19.08.2026 (harvest_2gis_v2.py от 6.08 —
-на три недели старее). Взято оттуда, с конкретными значениями:
+на три недели старее). Взято оттуда, с конкретными значениями, и сохранено
+при переходе на curl_cffi ниже:
 
 1. РОТАЦИЯ ЗАПРОСА ВМЕСТО ГЛУБОКОЙ ПАГИНАЦИИ ОДНОГО ЗАПРОСА. Симптом блокировки
    по их описанию: `currentPage` зависает на 1 (или прямая капча) после 4-6
@@ -26,15 +72,13 @@ window.initialState/встроенного JS-состояния карточк�
    вглубь — именно тот паттерн, который у них ловил блокировку. Ниже —
    ротация из 3 запросов, каждый не глубже 2 страниц.
 2. ПАУЗА МЕЖДУ ЗАПРОСАМИ КАРТОЧЕК ~2-2.5с — их значение, чтобы не поймать
-   отдельный burst-лимит ("no state" при частых fetch() подряд, не путать с
-   блокировкой пагинации). Было 1.5-2.5с — сузил нижнюю границу до 2.0.
-3. FETCH() ВМЕСТО НАВИГАЦИИ ЗА ДЕТАЛЯМИ КАРТОЧКИ. Их рецепт вместо
-   page.goto() на каждую карточку делает fetch() HTML-страницы карточки прямо
-   в браузерном контексте и регэкспом достаёт встроенное
-   `var initialState = JSON.parse('...')` из тела ответа — задокументировано
-   как более быстрый и надёжный способ, чем клик/навигация. Перенесено ниже
-   (_scrape_card теперь делает это через page.evaluate + fetch, без goto на
-   каждую карточку).
+   отдельный burst-лимит ("no state" при частых запросах подряд, не путать с
+   блокировкой пагинации).
+3. ЧТЕНИЕ ВСТРОЕННОГО СОСТОЯНИЯ КАРТОЧКИ ВМЕСТО НАВИГАЦИИ. Их рецепт вместо
+   page.goto() на каждую карточку забирал HTML карточки и регэкспом доставал
+   `var initialState = JSON.parse('...')` из тела ответа. С curl_cffi это
+   стало прямым HTTP-запросом (браузер вообще не участвует) — тот же приём,
+   на один слой проще.
 
 ЧТО НЕ ПЕРЕНЕСЕНО и почему: их рецепт использует префикс `/ru/` в URL
 (`2gis.<TLD>/ru/<city>/firm/<id>`) — но это специфика TLD, где русский язык
@@ -44,37 +88,22 @@ window.initialState/встроенного JS-состояния карточк�
 сломать рабочий URL ради приёма, решающего не нашу проблему. Оставлен прежний
 путь без `/ru/`.
 
---- ГЛАВНОЕ: это НЕ чинит блокировку с этой сети ---
+--- ПЭЙСИНГ НЕ УСКОРЕН ---
 
-С сети, где сейчас работает эта машина, 2gis.ru отдаёт на любой запрос —
-включая голый /tyumen без единого поиска — жёсткий редирект на
-captcha.2gis.ru/form, "подозрительная активность с вашего IP" (проверено и
-через Playwright, и напрямую через requests). Проверено также 27.08.2026:
-ТА ЖЕ блокировка одинаково срабатывает на 2gis.kz и 2gis.by с этой же сети —
-это не особенность именно российского домена, блок именно по IP/сети целиком,
-на уровне всей платформы 2ГИС. Симптом иной, чем в 2gis_deep_scan.md (там —
-блокировка вглубь ОДНОГО запроса после нескольких страниц, снимается сменой
-запроса; здесь — блокировка с первого же запроса, ротация запроса не поможет).
-
-Прокси/VPN-инфраструктуры в коде и документах RUSIMEX НЕ найдено — весь код
-там (все *2gis*.py, QUALITY_RULES.md) работает через обычный Playwright +
-системный Chrome, без единого упоминания proxy/VPN/резидентных IP. Значит,
-там просто не пытались обойти сетевой блок таким способом (или он им не
-встречался на их тогдашней сети). Единственная явная зацепка по времени: их
-рабочие подтверждения по 2GIS датированы 6-19.08.2026, а сегодняшний блок
-(27.08.2026) — сплошной и с первого запроса. Похоже на то, что IP/сеть этой
-машины со временем накопили блокировку у 2ГИС (не исключено, что как раз от
-объёма прошлого проекта) — а не на то, что 2ГИС в принципе не пускает эту
-страну/провайдера. Практический вывод для владельца: нужен другой исходящий
-IP (другая сеть, смена VPN-выхода, или резидентный прокси, если будет
-заведён) — это ТРЕБОВАНИЕ, не пожелание, и не то же самое, что "подождать
-российский IP": дело не в геолокации самой по себе, а в репутации конкретного
-IP у антифрод-системы 2ГИС. Код ниже рабочий и не трогать его не придётся —
-достаточно сменить сеть.
+curl_cffi быстрее Playwright на порядки, но паузы оставлены ровно прежними:
+их значения пришли из месяцев прогонов RUSIMEX и существуют, чтобы не ловить
+блокировку на масштабе, а не потому, что транспорт медленный. Быстрее
+транспорт — та же вежливость. Прежняя пауза 3.0-4.5с после навигации была
+ожиданием отрисовки SPA; при SSR ждать нечего, но интервал между запросами
+к поиску сохранён таким же (см. _SEARCH_RENDER_PAUSE ниже), чтобы частота
+обращений к 2ГИС не выросла молча вместе со сменой клиента.
 """
 import re
+import json
 import time
 import random
+
+from curl_cffi import requests as curl_requests
 
 from .base import SourceBlocked
 
@@ -82,94 +111,193 @@ from .base import SourceBlocked
 QUERIES = ["стоматология", "стоматологическая клиника", "зубной врач"]
 MAX_PAGES_PER_QUERY = 2
 
-FIND_STATE_JS = r"""
-async (url) => {
-    function findStateCode(html) {
-        const marker = "var initialState = JSON.parse('";
-        const startIdx = html.indexOf(marker);
-        if (startIdx < 0) return null;
-        let i = startIdx + marker.length;
-        while (i < html.length) {
-            if (html[i] === '\\') { i += 2; continue; }
-            if (html[i] === "'") { i += 1; break; }
-            i += 1;
-        }
-        return html.slice(startIdx + "var initialState = ".length, i + 2);
-    }
-    try {
-        const resp = await fetch(url);
-        const finalUrl = resp.url || url;
-        const html = await resp.text();
-        const code = findStateCode(html);
-        if (!code) return {error: "no state", finalUrl, htmlHead: html.slice(0, 200)};
-        const state = new Function('return ' + code)();
-        return {state, finalUrl};
-    } catch (e) {
-        return {error: String(e)};
-    }
-}
-"""
+# Профиль браузера для подделки TLS/HTTP2-отпечатка. Именно это, а не заголовки
+# и не IP, открывает 2ГИС (см. docstring). Заголовки поверх профиля НЕ
+# добавляем: рабочим на живой проверке был именно вариант "impersonate +
+# минимальные заголовки", а свои заголовки поверх имперсонации рискуют
+# рассогласовать набор/порядок с тем, что обещает TLS-отпечаток.
+IMPERSONATE = "chrome"
+
+TIMEOUT = 45
+
+# Паузы. Значения не менять "потому что стало быстрее" — см. docstring.
+_SEARCH_RENDER_PAUSE = (3.0, 4.5)   # бывшее ожидание отрисовки SPA, сохранено как пэйсинг
+_SEARCH_PAGE_PAUSE = (1.2, 2.2)     # между страницами одного запроса
+_CARD_PAUSE = (2.0, 2.5)            # между карточками (2gis_deep_scan.md, п.2)
+
+_STATE_MARKER = "var initialState = JSON.parse('"
+_FIRM_ID_RE = re.compile(r"/firm/(\d+)")
+
+# Признаки того, что нас увели с настоящей страницы. /museum — страница-заглушка,
+# на которую 2ГИС редиректит подозрительного клиента; captcha.2gis.ru — сама
+# проверка. Ни то, ни другое не обходим: останавливаемся (см. base.SourceBlocked).
+_BLOCK_MARKERS = ("captcha.2gis.ru", "/museum")
 
 
-def _open_browser(pw):
-    b = pw.chromium.launch(
-        channel="chrome", headless=False,
-        args=["--disable-blink-features=AutomationControlled", "--disable-quic",
-              "--window-position=2000,2000"])
-    ctx = b.new_context(locale="ru-RU", viewport={"width": 1366, "height": 850})
-    return b, ctx
+def _js_unescape(lit):
+    """Раскодировать тело JS-строки в одинарных кавычках.
+
+    В SSR-HTML состояние лежит как `JSON.parse('<JSON, экранированный под
+    JS-строку>')`. Браузер раньше делал это сам (new Function(...)); здесь
+    нужен один проход, снимающий ровно ОДИН слой экранирования — после него
+    остаётся валидный JSON (внутренние `\\"` JSON'а приходят как `\\\\"` и
+    корректно превращаются обратно в `\\"`, потому что `\\\\` обрабатывается
+    раньше следующей кавычки при проходе слева направо).
+    """
+    out = []
+    i = 0
+    n = len(lit)
+    simple = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+    while i < n:
+        c = lit[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        i += 1
+        if i >= n:
+            break
+        e = lit[i]
+        if e == "u":
+            out.append(chr(int(lit[i + 1:i + 5], 16)))
+            i += 5
+        elif e == "x":
+            out.append(chr(int(lit[i + 1:i + 3], 16)))
+            i += 3
+        elif e in simple:
+            out.append(simple[e])
+            i += 1
+        else:
+            # \' \" \\ \/ и всё прочее — сам символ
+            out.append(e)
+            i += 1
+    return "".join(out)
 
 
-def _check_blocked(page):
-    u = page.url or ""
-    if "captcha.2gis.ru" in u or "/museum" in u:
-        raise SourceBlocked(f"2gis: капча/блок на {u[:160]}")
+def _extract_state(html):
+    """Достать и разобрать `var initialState = JSON.parse('...')`.
+    None, если маркера нет или JSON не разобрался (порча/подменённая страница)."""
+    start = html.find(_STATE_MARKER)
+    if start < 0:
+        return None
+    i = start + len(_STATE_MARKER)
+    while i < len(html):
+        if html[i] == "\\":
+            i += 2
+            continue
+        if html[i] == "'":
+            break
+        i += 1
+    try:
+        return json.loads(_js_unescape(html[start + len(_STATE_MARKER):i]))
+    except ValueError:
+        return None
 
 
-def _collect_firm_ids(page, city_slug, seen_ids):
+def _get(session, url):
+    """Один GET с проверкой на блок. Возвращает HTML-текст.
+
+    2ГИС отдаёт UTF-8; декодируем явно, а не полагаемся на угадывание
+    кодировки — детерминированный результат важнее, а ошибиться тут значит
+    получить мусор в названиях/адресах, который дальше тихо уедет в базу."""
+    r = session.get(url, timeout=TIMEOUT)
+    final_url = r.url or url
+    if any(m in final_url for m in _BLOCK_MARKERS):
+        raise SourceBlocked(f"2gis: капча/блок на {final_url[:160]}")
+    if r.status_code in (403, 429):
+        raise SourceBlocked(f"2gis: HTTP {r.status_code} на {final_url[:160]}")
+    if r.status_code != 200:
+        return ""
+    return r.content.decode("utf-8", "replace")
+
+
+def open_session(log=print):
+    """Одна curl_cffi-сессия на весь регион (интерфейс общий с остальными
+    источниками, см. src/pipeline.py). Сессия держит куки и переиспользует
+    соединение; браузер, в отличие от прежней версии, не запускается вовсе."""
+    return curl_requests.Session(impersonate=IMPERSONATE)
+
+
+def close_session(session):
+    session.close()
+
+
+def _collect_firm_ids(session, city_slug, seen_ids):
     """Ротация по QUERIES, максимум MAX_PAGES_PER_QUERY страниц на запрос
-    (см. docstring, п.1 — глубже означает риск поймать блокировку пагинации)."""
+    (см. docstring, п.1 — глубже означает риск поймать блокировку пагинации).
+
+    Идентификаторы берём регэкспом по ссылкам /firm/<id> в SSR-HTML — это ровно
+    то, что раньше собиралось из DOM (`a[href*='/firm/']`), только без браузера.
+    Намеренно НЕ берём ключи data.entity.profile из initialState: туда попадают
+    и рекламные врезки, которых нет в самой выдаче."""
     new_ids = []
     for query in QUERIES:
-        query_new = 0
         for page_n in range(1, MAX_PAGES_PER_QUERY + 1):
             url = f"https://2gis.ru/{city_slug}/search/{query}"
             if page_n > 1:
                 url += f"/page/{page_n}"
-            page.goto(url, timeout=45000, wait_until="domcontentloaded")
-            page.wait_for_timeout(random.randint(3000, 4500))
-            _check_blocked(page)
-            hrefs = page.eval_on_selector_all(
-                "a[href*='/firm/']", "els => els.map(e => e.getAttribute('href'))")
+            html = _get(session, url)
+            time.sleep(random.uniform(*_SEARCH_RENDER_PAUSE))
             page_new = 0
-            for h in hrefs:
-                m = re.search(r"/firm/(\d+)", h or "")
-                if m and m.group(1) not in seen_ids:
-                    seen_ids.add(m.group(1))
-                    new_ids.append(m.group(1))
+            for fid in _FIRM_ID_RE.findall(html):
+                if fid not in seen_ids:
+                    seen_ids.add(fid)
+                    new_ids.append(fid)
                     page_new += 1
-            query_new += page_new
             if page_new == 0:
                 break
-            time.sleep(random.uniform(1.2, 2.2))
-        # query_new == 0 на первой странице -> либо тема пуста в этом городе,
-        # либо именно этот запрос уже заблокирован вглубь — следующий запрос
-        # в ротации всё равно пробуем, он даёт свежую страницу 1 (см. docstring, п.1)
+            time.sleep(random.uniform(*_SEARCH_PAGE_PAUSE))
+        # 0 новых на первой странице -> либо тема пуста в этом городе, либо
+        # именно этот запрос уже заблокирован вглубь — следующий запрос в
+        # ротации всё равно пробуем, он даёт свежую страницу 1 (docstring, п.1)
     return new_ids
 
 
-def _scrape_card(page, city_slug, fid):
-    """fetch() + разбор встроенного состояния вместо page.goto() на карточку —
-    приём из 2gis_deep_scan.md (см. docstring, п.3): быстрее и надёжнее клика/
-    навигации, задокументировано как проверенное на живых данных 18-19.08.2026."""
+def _pick_contacts(item):
+    """Телефоны/почты/сайт из contact_groups карточки.
+
+    Про сайт важно: у контакта type=website поле `value` — это ТРЕКОВЫЙ
+    редирект 2ГИС (`link.2gis.ru/1.2/.../?http://настоящий-сайт`), а настоящий
+    адрес лежит в `url`. Поэтому для сайта порядок предпочтения обратный
+    (url раньше value): в режиме has-site этот URL уходит в лид и дальше в
+    audit_sites.py — записать туда link.2gis.ru значило бы проверять на
+    соответствие закону сам 2ГИС вместо клиники. Для phone/email `value`,
+    наоборот, самое чистое (нормализованный номер / адрес почты).
+
+    Оговорка на будущее: website-контактов у карточки бывает несколько, и
+    вторым нередко идёт виджет онлайн-чата (видели jivo.chat). Берём первый —
+    2ГИС сам ставит основной сайт первым; если однажды попадёт чат, это будет
+    видно в аудите сайта, а не тихо испортит данные."""
+    phones, emails, website = [], [], ""
+    for g in item.get("contact_groups") or []:
+        for c in g.get("contacts") or []:
+            t = c.get("type")
+            if t == "phone":
+                v = c.get("value") or c.get("text")
+                if v:
+                    phones.append(v)
+            elif t == "email":
+                v = c.get("value") or c.get("text")
+                if v:
+                    emails.append(v)
+            elif t == "website" and not website:
+                v = c.get("url") or c.get("value") or c.get("text")
+                if v:
+                    website = str(v).strip()
+    return phones, emails, website
+
+
+def _scrape_card(session, city_slug, fid):
+    """Забрать карточку фирмы обычным GET и разобрать встроенное состояние
+    (приём из 2gis_deep_scan.md, см. docstring, п.3 — только теперь без
+    браузера в качестве посредника)."""
     url = f"https://2gis.ru/{city_slug}/firm/{fid}"
-    result = page.evaluate(FIND_STATE_JS, url)
-    if result.get("error"):
+    html = _get(session, url)
+    if not html:
         return None
-    final_url = result.get("finalUrl") or url
-    if "captcha.2gis.ru" in final_url or "/museum" in final_url:
-        raise SourceBlocked(f"2gis: капча/блок на {final_url[:160]}")
-    state = result.get("state") or {}
+    state = _extract_state(html)
+    if not state:
+        return None
     try:
         profile = state["data"]["entity"]["profile"]
     except (KeyError, TypeError):
@@ -183,18 +311,7 @@ def _scrape_card(page, city_slug, fid):
                 break
     if not item:
         return None
-    phones, emails, website = [], [], ""
-    for g in item.get("contact_groups") or []:
-        for c in g.get("contacts") or []:
-            t = c.get("type")
-            v = c.get("value") or c.get("url") or c.get("text")
-            if t == "phone" and v:
-                phones.append(v)
-            elif t == "email" and v:
-                emails.append(v)
-            elif t == "website" and v and not website:
-                website = str(v).strip()  # сам URL, не только факт наличия (режим has-site)
-    has_site = bool(website)
+    phones, emails, website = _pick_contacts(item)
     city_name = ""
     for a in item.get("adm_div") or []:
         if a.get("type") == "city" and a.get("name"):
@@ -209,7 +326,7 @@ def _scrape_card(page, city_slug, fid):
         "address": item.get("address_name") or "",
         "phones_raw": phones,
         "emails_raw": emails,
-        "has_website": has_site,
+        "has_website": bool(website),
         "website": website,
         "source": "2gis",
         "source_url": url,
@@ -237,42 +354,23 @@ def _slugify_city(city):
     return known.get(key, key.replace(" ", "_").replace("-", "_"))
 
 
-def open_session(log=print):
-    """Один запуск Chrome на весь регион (открывать браузер на каждый город —
-    секунды накладных расходов ×N городов; чек-пойнт по городам делается на
-    уровне SQLite в pipeline.py, не на уровне браузера, см. 27.08.2026)."""
-    from playwright.sync_api import sync_playwright
-
-    pw = sync_playwright().start()
-    browser, ctx = _open_browser(pw)
-    page = ctx.new_page()
-    return {"pw": pw, "browser": browser, "ctx": ctx, "page": page}
-
-
-def close_session(session):
-    try:
-        session["browser"].close()
-    finally:
-        session["pw"].stop()
-
-
 def scrape_city(session, city, log=print):
-    """Требует Playwright + системный Chrome (через session из open_session()).
-    Кидает SourceBlocked при капче — вызывающий код (pipeline.py) это ловит
+    """session — из open_session() (curl_cffi.requests.Session с имперсонацией).
+    Кидает SourceBlocked при капче/блоке — вызывающий код (pipeline.py) это ловит
     и исключает 2gis из дальнейших городов региона, а не роняет весь прогон."""
-    page = session["page"]
     slug = _slugify_city(city)
     log(f"  [2gis] город: {city} (slug={slug})")
     seen_ids = set()
-    ids = _collect_firm_ids(page, slug, seen_ids)
+    ids = _collect_firm_ids(session, slug, seen_ids)
     log(f"  [2gis] {city}: найдено карточек {len(ids)}")
     out = []
     for fid in ids:
-        rec = _scrape_card(page, slug, fid)
+        rec = _scrape_card(session, slug, fid)
         if rec:
             out.append(rec)
-        # 2.0-2.5с — значение из 2gis_deep_scan.md (см. docstring, п.2)
-        time.sleep(random.uniform(2.0, 2.5))
+        # 2.0-2.5с — значение из 2gis_deep_scan.md (см. docstring, п.2).
+        # НЕ ускорять из-за того, что транспорт стал быстрее.
+        time.sleep(random.uniform(*_CARD_PAUSE))
     return out
 
 

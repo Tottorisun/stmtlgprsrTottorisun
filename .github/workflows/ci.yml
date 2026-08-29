@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies (skip playwright browser download — not needed for these checks)
-        run: pip install requests openpyxl python-dotenv pytest
+        run: pip install requests curl_cffi openpyxl python-dotenv pytest
 
       - name: Compile-check every module
         run: python -m compileall -q main.py src config tests
@@ -29,10 +29,11 @@ jobs:
           python -c "import ast; ast.parse(open('src/scrapers/yandex_maps.py', encoding='utf-8').read())"
           python -c "import ast; ast.parse(open('src/scrapers/gis2.py', encoding='utf-8').read())"
           python -c "import ast; ast.parse(open('src/scrapers/google_maps.py', encoding='utf-8').read())"
-          # scrapers/gis2.py и scrapers/google_maps.py импортируют playwright
-          # только внутри функции scrape_region(), поэтому обычный import модуля
-          # (без вызова функции) не требует playwright — не тянем сюда браузер
-          python -c "from src.scrapers import yandex_maps"
+          # yandex_maps и gis2 с 29.08.2026 оба ходят через curl_cffi и НЕ
+          # требуют playwright — импортируем их по-настоящему. google_maps
+          # импортирует playwright внутри функции, но браузер сюда всё равно
+          # не тянем: ему хватает ast-проверки выше.
+          python -c "from src.scrapers import yandex_maps, gis2"
 
       - name: Run offline unit tests (pure functions, no network)
         run: python -m pytest -q tests/
